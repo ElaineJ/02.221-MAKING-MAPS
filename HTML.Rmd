@@ -1,0 +1,149 @@
+---
+title: "Lab 9 - Spatial Analysis in R"
+author: "Elaine Cheong"
+date: "4/5/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library("data.table")
+library("sp")
+library("rgdal")
+library("spatstat")
+library("ggmap")
+library("maptools")
+library("ggplot2")
+tenders <- fread("02221-Lab9/tabula-tender-bids-from-mar-2012-to-jan-2017.csv", header = F, fill = T) 
+colnames(tenders) <- c("centre", "stall", "area", "trade", "bid", "month") #the table didnt had header so had to add them
+tenders <- tenders[centre != "",] #remove any empty rows
+tenders <- tenders[!1135,]  #remove entry at 1135 as it was a lockup header with no data field
+tenders[1:1134, type:="cooked",] # from row 1-1134, the stalls were cooked food
+tenders[1135:nrow(tenders), type:="lockup",] # remaining were lockup
+tenders[,bidNum:=as.numeric(gsub(bid,pattern = "\\$|,", replacement = "")),]
+tenders[,date:=as.Date(paste0("01-",month), "%d-%b-%Y"),] # change the format of the date
+tenders[,priceM2:= bidNum/as.numeric(area),]
+```
+
+Does the number of bids change over time?
+
+```{r}
+library(ggplot2)
+library(plotly)
+BidOverTime <- tenders[,list(count=length(stall)),by=date]
+pBidOverTime <- ggplot(BidOverTime, aes(date,count), fill=date) + geom_bar(stat = "identity") + xlab("Year") + ylab("Number of Bids") + ggtitle("Number of Bids Over the years of 2012-2017")
+ggplotly(pBidOverTime)
+```
+Removed 1 rows containing missing values (position_stack).
+
+Over the years from 2012 to 2016, the number of bids generally increases. The increase in hawker centres could be due to the development of new neighbourhoods. Since the present of hawker centres is part of Singapore culture, it will deifinitely be present in these new neighbourhoods. 
+
+
+Is there a relation between area and price?
+```{r}
+ggplot(tenders,aes(x=as.numeric(area),y=priceM2,colour=type)) + geom_line() + ggtitle("Price($/m2) against Area of Stalls(m2)")
+```
+# Remove data rows which are affected mainly between 589-637
+
+The most distinct pattern in this graph is the red line which represents the "cooked" type.
+Hawker stalls that sold cooked food had a higher price per area as compared to lockup stalls. There is an extreme surge in price at the 6m2 area. While lockup generally have a much lower price as the area per m2 gets bigger.
+
+```{r}
+h <- readOGR("hawker-centres-kml/HAWKERCENTRE.kml","HAWKERCENTRE")
+plot(h) #spatial distribution of stall locations
+```
+
+```{r}
+h.t <- data.frame(toupper(h$Name), h@coords[,1:2]) #dataframe
+colnames(h.t) <- c("name","lon","lat") # the column headers
+tenders.sp <- merge(tenders,h.t, by.x = "centre",by.y="name", all.x =T) #merge 'tenders' and 'h' by matching 'centre' and 'name' respectively
+centres <- tenders[,list(count=.N), by=centre] 
+centres[,location:=paste0(centre,",Singapore"),] # create a new data column 'location' which adds Singapore to the end of each centre name, aid the geocoding service
+g <- geocode(centres[,location,],output ="latlon", source="google", sensor = F) #use the geocode function from the ggmap to geocode using google service
+centres<- cbind(centres,g) #combine centres and g
+tenders.sp <- merge(tenders, centres, by.x = "centre", by.y= "centre", all.x = T)
+ggplot(tenders.sp, aes(x=lon, y=lat,size= priceM2, colour=type)) + geom_point(alpha=0.3) + coord_fixed() + ggtitle("Spatial Distribution of Stalls by Type and Price per square metre")# create spatial points based on their location and the type is determine by the colour of the circle, price per area depends on the size of the circle
+```
+
+```{r}
+ggplot(tenders.sp, aes(x=lon, y=lat)) + geom_point() + geom_density2d() + coord_fixed() + ggtitle("Contour plot of Stalls")
+```
+
+```{r}
+ggplot(tenders.sp, aes(x=lon, y=lat)) + geom_point() + geom_hex() + coord_fixed() +  ggtitle("Hexagonal binning plot of Stalls")
+```
+
+Number of Bids per Type
+```{r}
+ggplot(tenders.sp, aes(x=lon,y=lat,size = count, color=type)) + geom_point(alpha=0.3) + facet_wrap(~type) + coord_fixed()
+```
+
+From this graph we can see that the two types forms cluster(positive spatial correlation) within their own type, with lockup having the highest number of clusters.
+
+Number of Bids per Type per Year
+```{r}
+tenders.sp[,year:=substring(date,1,4),]
+ggplot(tenders.sp, aes(y=lat, x=lon)) + geom_point(alpha = 0.4, aes(colour = type, size = count)) + facet_wrap(~ year) + coord_fixed()
+```
+
+Over the years, the number of bids generally increases as can be seen from the higher colour intensity of every type. All two types can be seen to have the highest positive spatial correlation over the Southern part of Singapore. But it can be seen to have spreaded to more parts of Singapore over the years instead of being concentrated in the Southern part.
+
+
+Spatial Point Patterns
+
+```{r}
+centres.sp <- tenders.sp[lat>0,list(lon=lon[1],lat=lat[1], price=mean(priceM2),count=.N),by=centre]
+centres.sp[is.na(price),price:=0,]
+coordinates(centres.sp) <- c('lon','lat') #define the spatial coordinates
+centres.ppp <- unmark(as.ppp(centres.sp)) # convert data to ppp
+plot(centres.ppp)
+```
+
+```{r}
+sg <- readOGR(".","sg-all") #read a shapefile 
+sg.window <- as.owin(sg) #sg-all as 'window' for spatial point pattern
+centres.ppp <- centres.ppp[sg.window]# update centres.ppp
+plot(Kest(centres.ppp))
+```
+
+The blue line indicated random line(whether the data set was randomly distributed). Lines that were above the blue line suggest that the data are clustered. This corresponds to the spatial pattern seen above. 
+```{r}
+plot(density(centres.ppp,0.02))
+
+```
+
+```{r}
+contour(density(centres.ppp,0.02))
+```
+
+Intensity of Hawker centre with respect to Singapore's population 
+```{r}
+pop <- as.im(readGDAL("02221-Lab9/sg-pop.tif")) # raster file
+plot(rhohat(centres.ppp,pop)) #intensity of hawker centre with respect to Singapore's population
+```
+
+
+```{r}
+plot(rhohat(centres.ppp,pop,weights=centres.sp$price)) # plot the above with average price of stalls as weights
+```
+
+```{r}
+plot(pop) # Singapore's population density
+```
+
+```{r}
+plot(pop)
+plot(centres.ppp, add=T) # Singapore population density, overlayed with location of hawker centres
+```
+
+Places with lesser number of hawker centres are generally places that are not populated like the western part of Singapore which are also industry areas. Another area will be the North east region, which are actually new neighbourhoods. Since they are new neighbourhood, probably the government find that it is not necessary to set up many hawker centres in those regions. However, in recent years, the population in the North Eastern side of Singapore had increase at a faster rate that the number of hawker centres. 
+
+Another pattern that caught my attention, is the Southern Part of Singapore. The population is within 5000-10000, yet there is a positive spatial correlation of hawker centres. This is because the Southern region is the city area which is highly visited by tourists. Since it is an tourist hotspot, tourists would definitely want to taste local delights, which makes the location of hawker centres a strategic spot! Furthermore, the Southern Part is also the business district which is filled with employees from various organisations who have their meals in the region.
+
+The upper end of Singapore which is the Northern Part is nearer to Malaysia, most of the people staying in Woodlands, Sembawang are usually people who are from Malaysia and are working in Singapore. Most of them work odd hours and would usually cook. Hence Hawker centres are not frequent as much, resulting in no demand for the hawker centres.
+
+
